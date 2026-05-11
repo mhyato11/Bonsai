@@ -8,7 +8,7 @@ Drop the `Bonsai` folder into your Windower addons directory and then load it in
 
 ## Commands
 
-The slash command is `//bonsai` (or `//bon` for short).
+To operate Bonsai, use the command `//bonsai` (or `//bon` for short).
 
 - `//bon garden` runs all 4 garden nodes in order: Mineral Vein, Pond Dredger, Arboreal Grove, Coastal Fishing Net.
 - `//bon mine`, `//bon dredger`, `//bon grove`, `//bon net` run a single garden node.
@@ -30,4 +30,6 @@ The slash command is `//bonsai` (or `//bon` for short).
 
 The addon walks your character to each NPC directly, so be sure to have a clear straight path between nodes when running it. The natural order defined by the addon will always have a clear pathing and should not get stuck.
 
-Ghost breeding monster slots (slots whose name is still the placeholder "Breeding Monster", "Monster", etc.) are skipped automatically since poking them hangs the menu interaction.
+## Known Bugs
+
+When using `//bon all` and moving to the Rearing Grounds, due to the nature of the packet teleport sequence, it's possible that ghost monsters may spawn if you don't have the full 4 monster breeding slots filled. In such scenarios, the addon will skip over those monsters automatically. So far it seems to only be a visual glitch.
