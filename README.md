@@ -10,14 +10,23 @@ Drop the `Bonsai` folder into your Windower addons directory and then load it in
 
 To operate Bonsai, use the command `//bonsai` (or `//bon` for short).
 
+### Garden
 - `//bon garden` runs all 4 garden nodes in order: Mineral Vein, Pond Dredger, Arboreal Grove, Coastal Fishing Net.
-- `//bon mine`, `//bon dredger`, `//bon grove`, `//bon net` run a single garden node.
-- `//bon pet` pets every breeding monster in the rearing grounds. Please use this only in the Rearing Grounds part of the Mog Garden. If used in the main Mog Garden area, it will cancel.
-- `//bon all` does the garden cycle, then warps to the rearing grounds via Chacharoon, then pets all monsters.
-- `//bon cancel` aborts the current run.
-- `//bon furrow start` begins the Furrow loop: plant a Revival Root in each Garden Furrow, wait one hour for them to grow, harvest, repeat.
+- `//bon mine`, `//bon dredger`, `//bon grove`, `//bon net`, `//bon flotsam` run a single garden node.
+
+### Furrows
+- `//bon furrow start [1|2]` begins the Furrow loop: plant a Revival Root in each Garden Furrow, wait one hour for them to grow, harvest, repeat. Optionally use `furrow start 1` to begin cycling by planting first and `furrow start 2` to begin by harvesting first.
 - `//bon furrow stop` stops the Furrow loop.
 - `//bon furrow status` shows how long until the planted furrows are ready, or what the loop is currently doing.
+
+### Monster Rearing
+- `//bon pet` pets every breeding monster in the rearing grounds. Please use this only in the Rearing Grounds part of the Mog Garden. If used in the main Mog Garden area, it will cancel.
+
+### Full Automation
+- `//bon all` runs your customizable node order, then (if `pet` is included) warps to the rearing grounds via Chacharoon and pets all monsters. The default order is Mineral Vein, Pond Dredger, Arboreal Grove, Flotsam, Coastal Fishing Net, then pet.
+- `//bon add <node>` / `//bon remove <node>` add or remove a node from your `//bon all` order. Valid nodes: `mine`, `dredger`, `grove`, `net`, `flotsam`, `pet`. The order is saved per character.
+- `//bon list` shows your current `//bon all` order.
+- `//bon cancel` aborts the current run.
 
 ## Requirements
 
@@ -34,6 +43,10 @@ As such, you need at least one Revival Root in your inventory for it to work. Th
 
 The addon walks your character to each NPC directly, so be sure to have a clear straight path between nodes when running it. The natural order defined by the addon will always have a clear pathing and should not get stuck.
 
+In `//bon all`, `pet` always runs last regardless of where it sits in your order, since the warp to the Rearing Grounds is one-way.
+
 ## Known Bugs
 
 When using `//bon all` and moving to the Rearing Grounds, due to the nature of the packet teleport sequence, it's possible that ghost monsters may spawn if you don't have the full 4 monster breeding slots filled. In such scenarios, the addon will skip over those monsters automatically. So far it seems to only be a visual glitch.
+
+When using `//bon all` and moving to the Rearing Grounds, all rearing monsters will appear as the default mob model (Sheep). This seems to just be an aesthetic glitch and is fixed upon zoning.

@@ -1,0 +1,4 @@
+# Runtime-generated, per-character settings and debug logs.
+# bonall_settings.lua is keyed by server-assigned character name —
+# never commit or ship the data/ directory.
+data/
