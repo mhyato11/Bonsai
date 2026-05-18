@@ -31,6 +31,7 @@ local FURROW_HARVEST_WAIT_SECONDS = 61 * 60
 local FURROW_FERT_WAIT_SECONDS    = 30 * 60
 local FURROW_REST_SECONDS         = 10
 local FURROW_REMINDER_SECONDS     = { 45*60, 30*60, 15*60, 5*60 }
+local FURROW_FERT_REMINDER_SECONDS = { 15*60, 10*60, 5*60 }
 local REVIVAL_ROOT_ITEM_ID        = 940
 local MIRACLE_MULCH_ITEM_ID       = 8971
 local FURROW_FERTILIZE_OPT        = 16
@@ -436,9 +437,13 @@ windower.register_event('prerender', function()
             end
             pending_phase    = table.remove(phase_chain, 1)
             -- Adjust wait time if any fertilize failed
-            if pending_phase.dynamic_delay and USE_FERTILIZER and fert_failed then
-                chat('Fertilize failed on one or more furrows - falling back to full grow time (61 min).')
-                pending_phase.pre_delay = FURROW_HARVEST_WAIT_SECONDS
+            if pending_phase.dynamic_delay and USE_FERTILIZER then
+                if fert_failed then
+                    chat('Fertilize failed on one or more furrows - falling back to full grow time (61 min).')
+                    pending_phase.pre_delay = FURROW_HARVEST_WAIT_SECONDS
+                else
+                    chat('All furrows fertilized! Harvest in 30 min.')
+                end
             end
             phase_wait_until = os.clock() + (pending_phase.pre_delay or 0)
             -- Reset fert trackers for next cycle
@@ -813,7 +818,7 @@ windower.register_event('addon command', function(cmd, ...)
             local fert_phase    = { label='Fertilize furrows',  build_plan=build_furrow_fertilize_plan, pre_delay=5 }
             local wait_phase    = { label='Furrows growing',
                                     pre_delay = USE_FERTILIZER and FURROW_FERT_WAIT_SECONDS or FURROW_HARVEST_WAIT_SECONDS,
-                                    reminders = FURROW_REMINDER_SECONDS,
+                                    reminders = USE_FERTILIZER and FURROW_FERT_REMINDER_SECONDS or FURROW_REMINDER_SECONDS,
                                     dynamic_delay = true }
             local harvest_phase = { label='Harvest furrows', build_plan=build_furrow_harvest_plan, pre_delay=0 }
             local rest_phase    = { label=string.format('%d second rest between cycles', FURROW_REST_SECONDS),
