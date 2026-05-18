@@ -69,6 +69,7 @@ local warp_arrival_dest       = nil
 local loop_template           = nil
 local phase_reminders_pending = {}
 local fert_succeeded          = false
+local fert_failed             = false
 
 local function chat(msg) windower.add_to_chat(207, '[Bonsai] ' .. msg) end
 local function err(msg)  windower.add_to_chat(123, '[Bonsai] ' .. msg) end
@@ -434,14 +435,15 @@ windower.register_event('prerender', function()
                 return
             end
             pending_phase    = table.remove(phase_chain, 1)
-            -- Adjust wait time if fertilize failed
-            if pending_phase.dynamic_delay and USE_FERTILIZER and not fert_succeeded then
-                chat('Fertilize failed - falling back to full grow time (61 min).')
+            -- Adjust wait time if any fertilize failed
+            if pending_phase.dynamic_delay and USE_FERTILIZER and fert_failed then
+                chat('Fertilize failed on one or more furrows - falling back to full grow time (61 min).')
                 pending_phase.pre_delay = FURROW_HARVEST_WAIT_SECONDS
             end
             phase_wait_until = os.clock() + (pending_phase.pre_delay or 0)
-            -- Reset fert tracker for next cycle
+            -- Reset fert trackers for next cycle
             fert_succeeded = false
+            fert_failed = false
             phase_reminders_pending = {}
             if pending_phase.reminders then
                 for _, r in ipairs(pending_phase.reminders) do
@@ -502,6 +504,9 @@ windower.register_event('prerender', function()
                 if not ok then
                     err(string.format('Skipping %s: trade failed (%s, item %d).',
                         current_npc.name, tostring(why), t.item_id))
+                    if t.item_id == MIRACLE_MULCH_ITEM_ID then
+                        fert_failed = true
+                    end
                     go_to_cooldown()
                     return
                 end
