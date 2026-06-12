@@ -1,22 +1,27 @@
 _addon.name     = 'Bonsai'
-_addon.author   = 'Man In Black'
-_addon.version  = '1.0'
+_addon.author   = 'Noirblanc'
+_addon.version  = '1.1'
 _addon.commands = {'bonsai', 'bon'}
 
 local packets = require('packets')
+require('coroutine')
 
 local MOG_GARDEN_ZONE     = 280
-local POKE_DISTANCE       = 3.5
-local STATE_TIMEOUT       = 30.0
+local POKE_DISTANCE       = 2.0
+local MOVE_STUCK_TIMEOUT  = 3.0
+local STATE_TIMEOUT         = 30.0
+local POKE_RESPONSE_TIMEOUT = 7.0
 local INTER_NPC_DELAY     = 1.5
 local INTER_MESSAGE_DELAY = 1.0
 local MAX_LOOP_INTERACTS  = 16
+local SEND_ALL_DELAY      = 0.5
+local MARCO_WAIT          = 0.3
 
 local NPC_PLAN_GARDEN = {
     { kind='garden', name_prefix='Mineral Vein',         opt=1, mode='multi'  },
-    { kind='garden', name_prefix='Pond Dredger',         opt=0, mode='single' },
+    { kind='garden', name_prefix='Pond Dredger',         opt=0, mode='single', poke_dist=3.0 },
     { kind='garden', name_prefix='Arboreal Grove',       opt=0, mode='multi'  },
-    { kind='garden', name_prefix='Coastal Fishing Net',  opt=0, mode='single' },
+    { kind='garden', name_prefix='Coastal Fishing Net',  opt=0, mode='single', poke_dist=3.0 },
 }
 
 local MONSTER_INDEX_LO    = 0x8A
@@ -28,9 +33,14 @@ local FURROW_NAME_PREFIX          = 'Garden Furrow'
 local FURROW_PLANT_OPT            = 16
 local FURROW_HARVEST_OPT          = 18
 local FURROW_HARVEST_WAIT_SECONDS = 61 * 60
+local FURROW_FERT_WAIT_SECONDS    = 30 * 60
 local FURROW_REST_SECONDS         = 10
 local FURROW_REMINDER_SECONDS     = { 45*60, 30*60, 15*60, 5*60 }
+local FURROW_FERT_REMINDER_SECONDS = { 15*60, 10*60, 5*60 }
 local REVIVAL_ROOT_ITEM_ID        = 940
+local MIRACLE_MULCH_ITEM_ID       = 8971
+local FURROW_FERTILIZE_OPT        = 16
+local USE_FERTILIZER              = false
 
 local WARP_TO_REARING_GROUNDS = {
     kind='warp', mode='warp', name_prefix='Chacharoon',
@@ -64,6 +74,9 @@ local phase_wait_until        = 0
 local warp_arrival_dest       = nil
 local loop_template           = nil
 local phase_reminders_pending = {}
+local fert_succeeded          = false
+local fert_failed             = false
+local plant_failed            = false
 
 local function chat(msg) windower.add_to_chat(207, '[Bonsai] ' .. msg) end
 local function err(msg)  windower.add_to_chat(123, '[Bonsai] ' .. msg) end
@@ -219,6 +232,20 @@ local function build_furrow_harvest_plan()
             index = f.index,
             opt   = FURROW_HARVEST_OPT,
             mode  = 'pet',
+        }
+    end
+    return plan
+end
+
+local function build_furrow_fertilize_plan()
+    local plan = {}
+    for _, f in ipairs(find_all_furrows()) do
+        plan[#plan+1] = {
+            kind  = 'furrow',
+            index = f.index,
+            opt   = FURROW_FERTILIZE_OPT,
+            mode  = 'single',
+            trade = { item_id = MIRACLE_MULCH_ITEM_ID, count = 1 },
         }
     end
     return plan
@@ -388,16 +415,48 @@ local function go_to_cooldown()
     set_state(STATE_COOLDOWN)
 end
 
+local function release_menu()
+    windower.packets.inject_incoming(0x052, string.char(0,0,0,0,0,0,0,0))
+    windower.packets.inject_incoming(0x052, string.char(0,0,0,0,1,0,0,0))
+    if current_npc then
+        local p = packets.new('outgoing', 0x05B)
+        p['Target']            = current_npc.id
+        p['Target Index']      = current_npc.index
+        p['Zone']              = MOG_GARDEN_ZONE
+        p['Menu ID']           = current_npc.menu_id or 0
+        p['Option Index']      = 0
+        p['_unknown1']         = 16384
+        p['Automated Message'] = false
+        p['_unknown2']         = 0
+        packets.inject(p)
+    end
+end
+
+local function skip_current_node(reason)
+    local had_event = state == STATE_POKED or state == STATE_SENDING or state == STATE_INTER_MESSAGE
+    if state == STATE_MOVING then windower.ffxi.run(false) end
+    if current_npc then
+        err(string.format('Skipping %s (%s).', current_npc.name or '?', reason or 'no response'))
+    else
+        err('Skipping node (' .. (reason or 'no response') .. ').')
+    end
+    if had_event then release_menu() end
+    go_to_cooldown()
+end
+
 windower.register_event('prerender', function()
     if state == STATE_IDLE then return end
 
     local now = os.clock()
 
-    if state ~= STATE_FIND_NEXT and state ~= STATE_COOLDOWN
-       and state ~= STATE_INTER_MESSAGE and state ~= STATE_PHASE_WAIT
-       and state_time > 0 and now - state_time > STATE_TIMEOUT then
-        err('Timeout in state ' .. state .. ', aborting cycle')
-        reset_all()
+    local interaction_timeout = nil
+    if state == STATE_POKED or state == STATE_SENDING then
+        interaction_timeout = POKE_RESPONSE_TIMEOUT
+    elseif state == STATE_MOVING then
+        interaction_timeout = STATE_TIMEOUT
+    end
+    if interaction_timeout and state_time > 0 and now - state_time > interaction_timeout then
+        skip_current_node('no response in state ' .. state)
         return
     end
 
@@ -415,7 +474,28 @@ windower.register_event('prerender', function()
                 return
             end
             pending_phase    = table.remove(phase_chain, 1)
+            -- Adjust wait time if any fertilize failed
+            if pending_phase.dynamic_delay and USE_FERTILIZER then
+                if plant_failed then
+                    chat('Out of Revival Roots - stopping loop.')
+                    reset_all()
+                    return
+                elseif fert_failed then
+                    chat('Fertilize failed on one or more furrows - falling back to full grow time (61 min).')
+                    pending_phase.pre_delay = FURROW_HARVEST_WAIT_SECONDS
+                else
+                    chat('All furrows fertilized! Harvest in 30 min.')
+                end
+            elseif pending_phase.dynamic_delay and plant_failed then
+                chat('Out of Revival Roots - stopping loop.')
+                reset_all()
+                return
+            end
             phase_wait_until = os.clock() + (pending_phase.pre_delay or 0)
+            -- Reset fert trackers for next cycle
+            fert_succeeded = false
+            fert_failed = false
+            plant_failed = false
             phase_reminders_pending = {}
             if pending_phase.reminders then
                 for _, r in ipairs(pending_phase.reminders) do
@@ -468,7 +548,8 @@ windower.register_event('prerender', function()
         end
         local dx, dy = mob.x - me.x, mob.y - me.y
         local dist   = math.sqrt(dx*dx + dy*dy)
-        if dist <= POKE_DISTANCE then
+        local poke_dist = (current_npc.plan and current_npc.plan.poke_dist) or POKE_DISTANCE
+        if dist <= poke_dist then
             windower.ffxi.run(false)
             if current_npc.plan and current_npc.plan.trade then
                 local t = current_npc.plan.trade
@@ -476,13 +557,28 @@ windower.register_event('prerender', function()
                 if not ok then
                     err(string.format('Skipping %s: trade failed (%s, item %d).',
                         current_npc.name, tostring(why), t.item_id))
+                    if t.item_id == MIRACLE_MULCH_ITEM_ID then
+                        fert_failed = true
+                    elseif t.item_id == REVIVAL_ROOT_ITEM_ID then
+                        plant_failed = true
+                    end
                     go_to_cooldown()
                     return
+                end
+                if t.item_id == MIRACLE_MULCH_ITEM_ID then
+                    fert_succeeded = true
                 end
             else
                 send_poke(current_npc)
             end
             set_state(STATE_POKED)
+            return
+        end
+        if not current_npc.move_last_dist or dist + 0.5 < current_npc.move_last_dist then
+            current_npc.move_last_dist     = dist
+            current_npc.move_progress_time = now
+        elseif current_npc.move_progress_time and now - current_npc.move_progress_time > MOVE_STUCK_TIMEOUT then
+            skip_current_node('stuck approaching node')
             return
         end
         local angle = math.atan2(dy, dx) * -1
@@ -548,6 +644,16 @@ windower.register_event('prerender', function()
         local plan = phase.plan or phase.build_plan() or {}
         if #plan == 0 then
             err(string.format('Phase "%s": no targets, skipping.', phase.label or '?'))
+            current_plan    = {}
+            plan_index      = 1
+            cycle_end_index = 0
+            set_state(STATE_FIND_NEXT)
+            return
+        end
+        -- Skip fertilize phase if planting failed
+        if phase.label == 'Fertilize furrows' and plant_failed then
+            chat('Skipping fertilize - planting failed on one or more furrows.')
+            fert_failed = true
             current_plan    = {}
             plan_index      = 1
             cycle_end_index = 0
@@ -630,6 +736,68 @@ windower.register_event('incoming chunk', function(id, data)
     end
 end)
 
+local ipc_participants = nil
+
+local function send_all_exec(name, msg)
+    windower.send_ipc_message('bonsai_exec ' .. name .. ' ' .. msg)
+end
+
+local function receive_send_all(msg)
+    windower.send_command('bon ' .. msg)
+end
+
+local function send_all(msg, delay, participants)
+    local me     = windower.ffxi.get_mob_by_target('me')
+    local myname = me and me.name
+    local total  = 0
+    for _, c in ipairs(participants) do
+        if c == myname then
+            receive_send_all:schedule(total, msg)
+        else
+            send_all_exec:schedule(total, c, msg)
+        end
+        total = total + delay
+    end
+end
+
+local function begin_send_all(msg)
+    local me = windower.ffxi.get_mob_by_target('me')
+    if not me or not me.name then
+        err('Not logged in yet.')
+        return
+    end
+    ipc_participants = { me.name }
+    windower.send_ipc_message('bonsai_marco ' .. me.name)
+    local function go()
+        local participants = ipc_participants or { me.name }
+        ipc_participants = nil
+        chat(string.format('Dispatching "%s" to %d character(s), %.1fs apart.',
+            msg, #participants, SEND_ALL_DELAY))
+        send_all(msg, SEND_ALL_DELAY, participants)
+    end
+    go:schedule(MARCO_WAIT)
+end
+
+windower.register_event('ipc message', function(msg)
+    local args = {}
+    for w in msg:gmatch('%S+') do args[#args + 1] = w end
+    local cmd    = args[1]
+    local me     = windower.ffxi.get_mob_by_target('me')
+    local myname = me and me.name
+    if cmd == 'bonsai_marco' then
+        if myname then windower.send_ipc_message('bonsai_polo ' .. myname) end
+    elseif cmd == 'bonsai_polo' then
+        if ipc_participants and args[2] then
+            ipc_participants[#ipc_participants + 1] = args[2]
+        end
+    elseif cmd == 'bonsai_exec' then
+        if myname and args[2] == myname then
+            local rest = msg:match('^bonsai_exec%s+%S+%s+(.+)$')
+            if rest then receive_send_all(rest) end
+        end
+    end
+end)
+
 windower.register_event('addon command', function(cmd, ...)
     cmd = (cmd or 'help'):lower()
     local args = {...}
@@ -662,7 +830,14 @@ windower.register_event('addon command', function(cmd, ...)
         net     = 4, fish  = 4, fishing = 4,
     }
 
-    if cmd == 'garden' or cmd == 'start' then
+    if cmd == '@all' or cmd == '@a' then
+        if #args == 0 then
+            err('Usage: //bon @all <command>   (e.g. //bon @all all)')
+            return
+        end
+        begin_send_all(table.concat(args, ' '))
+
+    elseif cmd == 'garden' or cmd == 'start' then
         begin_run(NPC_PLAN_GARDEN,
             'Starting garden cycle: Mineral Vein -> Pond Dredger -> Arboreal Grove -> Coastal Fishing Net',
             true)
@@ -731,14 +906,24 @@ windower.register_event('addon command', function(cmd, ...)
             end
         elseif sub == 'start' then
             local mode_arg = args[2]
+            local fert_arg = args[3] or args[2]
             local start_with_harvest
             if mode_arg == nil or mode_arg == '' or mode_arg == '1' then
                 start_with_harvest = false
             elseif mode_arg == '2' then
                 start_with_harvest = true
+            elseif mode_arg == 'fert' or mode_arg == 'fertilize' then
+                start_with_harvest = false
+                USE_FERTILIZER = true
             else
-                err('Usage: //bon furrow start [1|2]   (1 = plant first [default], 2 = harvest first)')
+                err('Usage: //bon furrow start [1|2] [fert]   (1 = plant first [default], 2 = harvest first, fert = use Miracle Mulch)')
                 return
+            end
+            -- Check for fert as second arg
+            if fert_arg == 'fert' or fert_arg == 'fertilize' then
+                USE_FERTILIZER = true
+            elseif mode_arg ~= 'fert' and mode_arg ~= 'fertilize' then
+                USE_FERTILIZER = false
             end
 
             local initial = start_with_harvest
@@ -765,10 +950,12 @@ windower.register_event('addon command', function(cmd, ...)
             chat(string.format('Inventory has %d Revival Root(s); %d furrow(s) found.',
                 roots, #initial))
 
-            local plant_phase   = { label='Plant furrows',   build_plan=build_furrow_plant_plan,   pre_delay=0 }
+            local plant_phase   = { label='Plant furrows',      build_plan=build_furrow_plant_plan,      pre_delay=0 }
+            local fert_phase    = { label='Fertilize furrows',  build_plan=build_furrow_fertilize_plan, pre_delay=5 }
             local wait_phase    = { label='Furrows growing',
-                                    pre_delay = FURROW_HARVEST_WAIT_SECONDS,
-                                    reminders = FURROW_REMINDER_SECONDS }
+                                    pre_delay = USE_FERTILIZER and FURROW_FERT_WAIT_SECONDS or FURROW_HARVEST_WAIT_SECONDS,
+                                    reminders = USE_FERTILIZER and FURROW_FERT_REMINDER_SECONDS or FURROW_REMINDER_SECONDS,
+                                    dynamic_delay = true }
             local harvest_phase = { label='Harvest furrows', build_plan=build_furrow_harvest_plan, pre_delay=0 }
             local rest_phase    = { label=string.format('%d second rest between cycles', FURROW_REST_SECONDS),
                                     pre_delay = FURROW_REST_SECONDS }
@@ -776,16 +963,32 @@ windower.register_event('addon command', function(cmd, ...)
             local initial_chain
             local start_label
             if start_with_harvest then
-                initial_chain = { rest_phase, plant_phase, wait_phase, harvest_phase }
-                start_label   = string.format('Furrow loop start (harvest first): %d furrow(s), harvest -> rest -> plant -> wait -> repeat',
-                                              #initial)
+                if USE_FERTILIZER then
+                    initial_chain = { rest_phase, plant_phase, fert_phase, wait_phase, harvest_phase }
+                    start_label   = string.format('Furrow loop start (harvest first): %d furrow(s), harvest -> rest -> plant -> fertilize -> wait -> repeat',
+                                                  #initial)
+                else
+                    initial_chain = { rest_phase, plant_phase, wait_phase, harvest_phase }
+                    start_label   = string.format('Furrow loop start (harvest first): %d furrow(s), harvest -> rest -> plant -> wait -> repeat',
+                                                  #initial)
+                end
             else
-                initial_chain = { wait_phase, harvest_phase }
-                start_label   = string.format('Furrow loop start: %d furrow(s), plant -> wait -> harvest -> repeat',
-                                              #initial)
+                if USE_FERTILIZER then
+                    initial_chain = { fert_phase, wait_phase, harvest_phase }
+                    start_label   = string.format('Furrow loop start: %d furrow(s), plant -> fertilize -> wait -> harvest -> repeat',
+                                                  #initial)
+                else
+                    initial_chain = { wait_phase, harvest_phase }
+                    start_label   = string.format('Furrow loop start: %d furrow(s), plant -> wait -> harvest -> repeat',
+                                                  #initial)
+                end
             end
             begin_run(initial, start_label, true, initial_chain)
-            loop_template = { rest_phase, plant_phase, wait_phase, harvest_phase }
+            if USE_FERTILIZER then
+                loop_template = { rest_phase, plant_phase, fert_phase, wait_phase, harvest_phase }
+            else
+                loop_template = { rest_phase, plant_phase, wait_phase, harvest_phase }
+            end
         else
             chat('Usage: //bon furrow start [1|2] | stop | status')
         end
@@ -894,12 +1097,18 @@ windower.register_event('addon command', function(cmd, ...)
             reset_all()
         end
 
+    elseif cmd == 'fertilize' or cmd == 'fert' then
+        USE_FERTILIZER = not USE_FERTILIZER
+        chat('Fertilizer (Miracle Mulch): ' .. (USE_FERTILIZER and 'ON' or 'OFF'))
+
     else
         chat('Commands:')
         chat('  all                              Run your customized //bon all order (see //bon list)')
+        chat('  @all <command>                   Run <command> on every logged-in box, staggered (e.g. //bon @all all)')
         chat('  garden                           Run all 4 garden nodes (Mog Garden)')
         chat('  pet                              Pet all monsters in current zone (idx 0x8A-0x8D)')
         chat('  furrow start [1|2] | stop | status   Loop plant <-> harvest. 1=plant first (default), 2=harvest first')
+        chat('  fert                             Toggle Miracle Mulch fertilizing (default: OFF)')
         chat('  mine | dredger | grove | net     Run just one garden NPC')
         chat('  flotsam                          Interact with Flotsam')
         chat('  add | remove (mine|dredger|grove|net|flotsam|pet)   Customize //bon all order (per-character, saved)')
