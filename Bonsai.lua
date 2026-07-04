@@ -1,6 +1,6 @@
 _addon.name     = 'Bonsai'
 _addon.author   = 'Noirblanc'
-_addon.version  = '1.1'
+_addon.version  = '1.2'
 _addon.commands = {'bonsai', 'bon'}
 
 local packets = require('packets')
@@ -444,8 +444,34 @@ local function skip_current_node(reason)
     go_to_cooldown()
 end
 
+local function is_inventory_full()
+    local inv = windower.ffxi.get_items(0)
+    if not inv then return false end
+    -- Windower tracks current item count vs maximum capacity for the bag
+    return inv.count >= inv.max
+end
+
 windower.register_event('prerender', function()
     if state == STATE_IDLE then return end
+
+    -- --- NEW INVENTORY CHECK ---
+    if is_inventory_full() then
+        -- Stop running if we are currently moving toward a node
+        if state == STATE_MOVING then 
+            windower.ffxi.run(false) 
+        end
+        
+        -- Safely back out if we are stuck in a menu dialogue
+        local in_interaction = (state == STATE_POKED or state == STATE_SENDING or state == STATE_INTER_MESSAGE)
+        if in_interaction then 
+            release_menu() 
+        end
+        
+        err('Inventory is full! Stopping Bonsai to prevent getting stuck.')
+        reset_all()
+        return
+    end
+    -- ---------------------------
 
     local now = os.clock()
 
@@ -1127,5 +1153,24 @@ windower.register_event('zone change', function(new_zone)
     if needs_garden and new_zone ~= MOG_GARDEN_ZONE then
         err('Left Mog Garden unexpectedly, aborting cycle.')
         reset_all()
+    end
+end)
+
+-- Safely handle addon unloads to prevent character soft-locks
+windower.register_event('unload', function()
+    if state ~= STATE_IDLE then
+        -- Stop character movement if currently running towards a node
+        if state == STATE_MOVING then
+            windower.ffxi.run(false)
+        end
+        
+        -- Check if we are in an active interaction state with a menu open
+        local in_interaction = (state == STATE_POKED or state == STATE_SENDING or state == STATE_INTER_MESSAGE)
+        
+        if in_interaction then
+            -- Release the menu safely on the server side
+            release_menu()
+            windower.add_to_chat(207, '[Bonsai] Addon unloaded safely: active NPC event terminated.')
+        end
     end
 end)
